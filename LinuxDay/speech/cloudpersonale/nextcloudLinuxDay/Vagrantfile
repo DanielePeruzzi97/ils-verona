@@ -1,0 +1,34 @@
+# DECOMMENTARE LA VERSIONE DI UBUNTU CHE SI VUOLE UTILIZZARE
+
+# Ubuntu server 22.04
+BOX_NAME="ubuntu/jammy64"
+# Ubuntu server 20.04
+# BOX_NAME="ubuntu/focal64"
+# Ubuntu Desktop 20.04 ## NOT TESTED
+# BOX_NAME="gusztavvargadr/ubuntu-desktop"
+
+Vagrant.configure("2") do | config |
+  config.vm.box = BOX_NAME
+  config.vm.hostname = "drive"
+  config.vm.define "drive"
+  config.vm.boot_timeout = 800
+  # IP DELLA VM
+  config.vm.network :private_network, ip: "192.168.56.2"
+  # PORT FORWARDING TRA GUEST E HOST
+  config.vm.network :forwarded_port, host: 8080, guest: 80, id: "http"
+  config.vm.network :forwarded_port, host: 8443, guest: 443, id: "https"
+  # CARTELLA PER PASSARE LO SCRIPT initSetup ALL'INTERNO DELLA VM
+  # NEL CASO SI VOLESSE RE-RUNNARLO
+  config.vm.synced_folder "scripts","/app/scripts"
+  config.vm.provision "shell", inline: <<-SHELL
+            echo "sudo su -" >> .bashrc
+      SHELL
+  # ESECUZIONE DELLO SCRIPT
+  config.vm.provision "shell", path: "./scripts/initSetup.sh"
+  config.vm.provider :virtualbox do | vb |
+    # PARAMETRI PER L'ASSEGNAMENTO DI RAM E CPU ALLA VM
+    vb.customize ["modifyvm", :id, "--memory", 1024]
+    vb.customize ["modifyvm", :id, "--name", "app"]
+    vb.customize ["modifyvm", :id, "--cpus", 1]
+  end
+end

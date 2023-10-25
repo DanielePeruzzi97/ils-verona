@@ -20,24 +20,21 @@ WEB_FOLDER=/usr/share/nginx/html
 NEXTCLOUD_FOLDER=${WEB_FOLDER}/nextcloud
 occ="sudo -u www-data php ${NEXTCLOUD_FOLDER}/occ"
 DB_POSTGRES_HOST_IP=127.0.0.1
-DB_POSTGRES_HOST_IP=5432
-PROTOCOLWEB=http
+DB_POSTGRES_PORT=5432
+PROTOCOLWEB=https
 REDIS_HOSTNAME=localhost
 REDIS_PORT=6379
+DOMAIN=drive.ilsverona.it
+EMAIL=d.peruzzi@fondazioneedulife.org
+#############################################
+
+# Utility functions
 #############################################
 function doMsg(){
     Green=$'\e[1;32m'
     White=$'\e[0m'
     msg=$1
     echo "${Green}" "${msg}" "${White}"
-}
-
-function installNginx(){
-    doMsg "--> Installo nginx e nginx-estras"
-    apt-get update -y
-    doMsg "--> Installazione nginx"
-    apt-get install nginx -y -qq
-    apt-get install nginx-extras -y -qq
 }
 
 function startNginx(){
@@ -61,14 +58,32 @@ function startNginx(){
             ;;
     esac
 }
+#############################################
+
+function installNginx(){
+    doMsg "--> Installo nginx e nginx-estras"
+    apt-get update -y
+    doMsg "--> Installazione nginx"
+    apt-get install nginx -y -qq
+    apt-get install nginx-extras -y -qq
+}
 
 function installPostgres(){
-    dsh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-    wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | tee /etc/apt/trusted.gpg.d/pgdg.asc &>/dev/null
-    apt-get update
+    if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+        doMsg "--> La repo di postgres è già presente, non la scarico"
+    else
+        doMsg "--> Aggiungo la repo di postgres"
+        sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | tee /etc/apt/trusted.gpg.d/pgdg.asc &>/dev/null
+        apt-get update
+    fi
 
-    doMsg "--> Installo postgresql ${POSTGRES_VERSION}"
-    apt-get install postgresql-${POSTGRES_VERSION} postgresql-client-${POSTGRES_VERSION} -y
+    if [ $(apt list | grep installed | postgresql | wc -l) -gt 0 ]; then
+        doMsg "--> Postgresql è già installato"
+    else
+        doMsg "--> Installo postgresql"
+        apt-get install postgresql-${POSTGRES_VERSION} postgresql-client-${POSTGRES_VERSION} -y
+    fi
 
     doMsg "--> Avvio postgresql ${POSTGRES_VERSION}"
     systemctl start postgresql
@@ -86,14 +101,19 @@ END
 }
 
 function installRedis(){
-    doMsg "--> Installo redis"
     REDISCONFIGFILE=/etc/redis/redis.conf
-    apt-get install redis-server -y -qq
-    sed '/#ADDCUSTOM/,$d' ${REDISCONFIGFILE} > ${REDISCONFIGFILE}.new
-    mv ${REDISCONFIGFILE} ${REDISCONFIGFILE}.old
-    mv ${REDISCONFIGFILE}.new ${REDISCONFIGFILE}
-    echo "#ADDCUSTOM" >> ${REDISCONFIGFILE}
-    echo "bind 127.0.0.1 ::1" >> ${REDISCONFIGFILE}
+    if [ -f ${REDISCONFIGFILE} ]; then
+        doMsg "--> Redis è già installato"
+    else
+        doMsg "--> Installo redis"
+        apt-get install redis-server -y -qq
+        sed '/#ADDCUSTOM/,$d' ${REDISCONFIGFILE} > ${REDISCONFIGFILE}.new
+        mv ${REDISCONFIGFILE} ${REDISCONFIGFILE}.old
+        mv ${REDISCONFIGFILE}.new ${REDISCONFIGFILE}
+        echo "#ADDCUSTOM" >> ${REDISCONFIGFILE}
+        echo "bind 127.0.0.1 ::1" >> ${REDISCONFIGFILE}
+    fi
+    
     systemctl restart redis
 }
 
@@ -131,8 +151,9 @@ function getNC(){
 
 
 function configureNginx(){
+    doMsg "--> Applico la configurazione di nginx"
     sed -i 's/user  nginx;/user  www-data;/' /etc/nginx/nginx.conf
-    cp /osa/app/nextcloud.conf /etc/nginx/conf.d/
+    cp /app/scripts/nextcloud.conf /etc/nginx/conf.d/
     if [ -f /etc/nginx/conf.d/default.conf ]; then
         mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled
     fi
@@ -142,18 +163,25 @@ function configureNginx(){
 }
 
 function configureNextcloud(){
-    doMsg "--> Controlla permessi cartella di setup"
+    doMsg "--> Controllo i permessi della cartella di setup"
     chown -R www-data:www-data ${NEXTCLOUD_FOLDER}
 
     doMsg "--> Installo Nextcloud"
     $occ maintenance:install --database \
     "pgsql" --database-name "${NEXTCLOUD_POSTGRES_DB}"  --database-user "${NEXTCLOUD_POSTGRES_USER}" --database-pass \
     "${NEXTCLOUD_POSTGRES_PASSWORD}" --database-host ${DB_POSTGRES_HOST_IP} --database-port ${DB_POSTGRES_PORT} --admin-user \
-    "${NEXTCLOUD_ADMIN}" --admin-pass "${NEXTCLOUD_ADMIN_PASSWORD}" --data-dir "/nfs4/www/data"
+    "${NEXTCLOUD_ADMIN}" --admin-pass "${NEXTCLOUD_ADMIN_PASSWORD}"
 
+    if [ $? -eq 0 ]; then
+        doMsg "--> Nextcloud installato correttamente"
+    else
+        doMsg "--> Errore durante l'installazione di Nextcloud"
+        exit 1
+    fi
     
     chmod +x ${NEXTCLOUD_FOLDER}/occ
     $occ config:system:set overwriteprotocol --value "${PROTOCOLWEB}"
+    $occ config:system:set trusted_domains 1 --value "${DOMAIN}"
     #pulisce dal cestino gli oggetti più vecchi di 30 giorni e quando serve spazio
     $occ config:system:set trashbin_retention_obligation --value '30,auto'
     #Tiene le versioni dei file per 365 giorni, poi le imposta in stato expired e le tiene per altri 30 giorni
@@ -163,7 +191,7 @@ function configureNextcloud(){
     $occ config:system:set filelocking.enabled  --value=true
     $occ config:system:set redis host --value="${REDIS_HOSTNAME}"
     $occ config:system:set redis port --value="${REDIS_PORT}" --type=integer
-    $occ config:system:set 'memcache.local' --value='\OC\Memcache\APCu'
+    $occ config:system:set 'memcache.local' --value='\OC\Memcache\Redis'
     $occ config:system:set 'memcache.distributed' --value='\OC\Memcache\Redis'
     $occ config:system:set 'memcache.locking' --value='\OC\Memcache\Redis'
 
@@ -232,9 +260,17 @@ function configureNginxCache(){
 
     doMsg "--> Applico le modifiche php"
     systemctl restart php${PHPVERSION}-fpm
-    systemctl restart nginx
 }
 
+function installCertbot(){
+    doMsg "--> Installo certbot"
+    apt-get install certbot python3-certbot-nginx -y -qq
+}
+
+function installCert(){
+    doMsg "--> Installo il certificato"
+    certbot certonly --standalone -d ${DOMAIN} -m ${EMAIL} --agree-tos --non-interactive
+}
 
 function customizingNextcloud(){
     doMsg "--> Configurazione di personalizzazioni utente"
@@ -247,16 +283,20 @@ function customizingNextcloud(){
     $occ config:system:set skeletondirectory --value ""
 }
 
-
+# Main
+#############################################
 installNginx
 startNginx start
 installDep
-startNginx restart
 installPostgres
 configureDatabase
 installRedis
 configureNginx
-configureNginxCache
 getNC
 configureNextcloud
+configureNginxCache
+installCertbot
+installCert
+startNginx restart
 #customizingNextcloud
+#############################################
