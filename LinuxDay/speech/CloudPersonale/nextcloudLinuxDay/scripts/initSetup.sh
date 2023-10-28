@@ -296,6 +296,7 @@ getNC
 configureNextcloud
 configureNginxCache
 installCertbot
+startNginx stop
 installCert
 startNginx restart
 #customizingNextcloud
